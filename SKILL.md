@@ -68,7 +68,6 @@ webnovel-writer 安装后，`SCRIPTS_DIR` 指向其 `scripts/` 目录，`webnove
 ```bash
 export WORKSPACE_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
 export SCRIPTS_DIR="${CLAUDE_PLUGIN_ROOT:?}/scripts"
-export SKILL_ROOT="${CLAUDE_PLUGIN_ROOT:?}/skills/webnovel-write"
 
 python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${WORKSPACE_ROOT}" preflight
 export PROJECT_ROOT="$(python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${WORKSPACE_ROOT}" where)"
@@ -79,6 +78,8 @@ python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" pla
 刷新合同树（从 `.webnovel/state.json` 读 genre，从详细大纲解析本章目标）：
 
 ```bash
+# CHAPTER_GOAL 从用户输入的"续写要求"中提取，若无额外要求则为空字符串
+export CHAPTER_GOAL="${USER_WRITING_REQUEST:-}"
 GENRE="$(python -X utf8 -c "import json,sys; s=json.load(open('${PROJECT_ROOT}/.webnovel/state.json',encoding='utf-8')); pi=s.get('project_info',{}); print(pi.get('genre') or s.get('project',{}).get('genre',''))")"
 
 python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${WORKSPACE_ROOT}" \
@@ -429,7 +430,7 @@ python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" bac
 chapter (int)
 issues (array of objects)
   ├── severity: "critical" | "high" | "medium" | "low"
-  ├── category: "continuity" | "setting" | "character" | "timeline" | "ai_flavor" | "logic" | "pacing" | "other"
+  ├── category: "continuity" | "setting" | "character" | "timeline" | "ai_flavor" | "logic" | "pacing" | "foreshadow" | "other"
   ├── location: string
   ├── description: string
   ├── evidence: string
