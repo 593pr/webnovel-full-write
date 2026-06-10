@@ -1,11 +1,28 @@
 ---
 name: webnovel-full-write
-description: 写小说章节并全量验证，也可单独审查已有章节。整合写作任务书→起草→深度审查→事实提取→提交→备份。支持 --fast 并行审查、--review-only 仅审查、目录容错与项目补全引导。触发词：续写、写第X章、继续写、下一章。审查模式触发词：审查第X章、检查第X章、review、验证章节、只审查。
+description: 写小说章节并全量验证，也可单独审查已有章节。整合写作任务书→起草→深度审查→事实提取→提交→备份。支持 --fast 并行审查、--review-only 仅审查、目录容错与项目补全引导。跨平台兼容：Claude Code / Codex / OpenClaw / Hermes。触发词：续写、写第X章、继续写、下一章。
 argument-hint: "<章号> [--review-only] [续写要求]"
 allowed-tools: Read Write Edit Grep Bash Glob AskUserQuestion Agent
 ---
 
 # 深度写作验证 Skill
+
+## 跨平台兼容
+
+本 skill 的核心流程（Phase 0-6、审查维度、schema、目录容错）是**平台无关的**——本质上是一组 LLM 可执行的指令。平台差异仅在三处：
+
+| 差异点 | Claude Code | Codex / OpenClaw / Hermes |
+|--------|-------------|--------------------------|
+| 环境变量 | `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_PLUGIN_ROOT}` | 平台对应变量（见 [PLATFORMS.md](./PLATFORMS.md)） |
+| 用户交互 | `AskUserQuestion` 工具 | 平台提供的用户提问机制 |
+| `--fast` 并行审查 | `Agent` 子代理 + `schema` 验证 | 平台子任务机制，或无此能力时降级为内联模式 |
+
+**安装方式**（各平台通用）：
+1. 将本仓库克隆到项目目录
+2. 将 `SKILL.md` 或 `CORE.md` 注册为平台的自定义指令/skill
+3. 确保 `webnovel-writer` Python CLI 可访问（设置 `WEBWRITER_DIR` 或平台特定路径）
+
+各平台具体配置见 **[PLATFORMS.md](./PLATFORMS.md)**。
 
 ## 目标
 
@@ -29,8 +46,10 @@ allowed-tools: Read Write Edit Grep Bash Glob AskUserQuestion Agent
 - 自动修复仍然生效
 
 `--fast` 模式下：
-- Phase 3 使用 Agent 子代理并行审查 8 个维度（每个维度一个独立 agent）
-- 所有 agent 完成后由主流程汇总、去重、输出 review_results.json
+- Phase 3 使用平台子任务机制并行审查 8 个维度（每个维度一个独立子任务）
+- Claude Code：使用 `Agent` 工具；其他平台：使用等效的子代理/并行任务能力
+- **若当前平台不支持子代理**：自动降级为内联模式（依次审查 8 个维度），不阻断流程
+- 所有子任务完成后由主流程汇总、去重、输出 review_results.json
 - 其余 Phase 与完整写作模式相同
 - **注意**：`--fast` 消耗约 3-4 倍 token，适合审查密集型章节；日常过渡章节建议默认内联模式
 
@@ -39,7 +58,7 @@ allowed-tools: Read Write Edit Grep Bash Glob AskUserQuestion Agent
 - 严格按当前模式对应的 Phase 顺序执行，不跳步、不并步
 - 审查不是走过场：每条 issue 必须引用设定原文作为 evidence
 - 自动修复不改剧情方向、不删叙事节点、不改角色性格
-- 发现无法自动修复的 blocking issue 时，用 AskUserQuestion 让用户裁决
+- 发现无法自动修复的 blocking issue 时，向用户提问，让用户裁决
 - Phase 3/4 输出的 JSON 必须严格匹配 schema（见附录），否则 commit 会失败
 - 本章文件命名必须零填充：`第0005章.md`，不是 `第5章.md`
 
@@ -66,15 +85,36 @@ webnovel-writer 安装后，`SCRIPTS_DIR` 指向其 `scripts/` 目录，`webnove
 1. 用户提到了"审查""检查""review""验证"且没有提"写""续写" → `--review-only` 模式
 2. 用户说"审查但不提交" → Phase 3 独立模式，审查完输出报告即停止
 3. 用户提到了"续写""写第X章""继续写""下一章" → 完整写作模式
-4. 不确定时 → 用 AskUserQuestion 确认
+4. 不确定时 → 向用户提问确认
 
 ---
 
 ## Phase 0：预检
 
+**确定脚本目录**（按优先级尝试）：
+1. 若当前平台提供了插件/技能根路径变量（如 Claude Code 的 `${CLAUDE_PLUGIN_ROOT}`），使用 `<插件根>/scripts`
+2. 若用户设置了 `WEBWRITER_DIR` 环境变量，使用 `${WEBWRITER_DIR}/scripts`
+3. 检查项目中是否存在 `webnovel-writer/scripts/` 目录
+4. 检查 `${HOME}/.webnovel-writer/scripts/` 是否存在
+5. 若均未找到，向用户提问："webnovel-writer 脚本目录在哪里？"，等待用户提供路径
+
 ```bash
-export WORKSPACE_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
-export SCRIPTS_DIR="${CLAUDE_PLUGIN_ROOT:?}/scripts"
+# 自动发现 SCRIPTS_DIR
+if [ -n "${CLAUDE_PLUGIN_ROOT}" ]; then
+  export SCRIPTS_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+elif [ -n "${WEBWRITER_DIR}" ]; then
+  export SCRIPTS_DIR="${WEBWRITER_DIR}/scripts"
+elif [ -d "${PWD}/webnovel-writer/scripts" ]; then
+  export SCRIPTS_DIR="${PWD}/webnovel-writer/scripts"
+elif [ -d "${HOME}/.webnovel-writer/scripts" ]; then
+  export SCRIPTS_DIR="${HOME}/.webnovel-writer/scripts"
+else
+  echo "❌ 未找到 webnovel-writer 脚本目录。请设置 WEBWRITER_DIR 环境变量。"
+  echo "   安装指引：https://github.com/lingfengQAQ/webnovel-writer"
+  exit 1
+fi
+
+export WORKSPACE_ROOT="${CLAUDE_PROJECT_DIR:-${CODEROOT:-${PROJECT_DIR:-$PWD}}}"
 
 python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${WORKSPACE_ROOT}" preflight
 export PROJECT_ROOT="$(python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${WORKSPACE_ROOT}" where)"
@@ -228,7 +268,7 @@ python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" \
 
 ### 2.3 保存
 
-写入 `正文/第{NNNN}章.md`（4 位零填充）。若文件已存在且有内容，追加到已有内容之后；若需替换，用 AskUserQuestion 确认。
+写入 `正文/第{NNNN}章.md`（4 位零填充）。若文件已存在且有内容，追加到已有内容之后；若需替换，向用户提问确认。
 
 ---
 
@@ -236,27 +276,37 @@ python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" \
 
 ### 3.0 模式选择
 
-**默认（内联）模式**：主流程逐维度审查，8 个维度依次执行。适合日常章节，token 消耗低。
+**默认（内联）模式**：主流程逐维度审查，8 个维度依次执行。适合日常章节，token 消耗低。**所有平台均支持。**
 
-**--fast（并行）模式**：使用 Agent 工具并行启动 8 个审查 agent，每个负责一个维度。所有 agent 同时执行，汇总后由主流程去重、判定 severity、执行自动修复。
+**--fast（并行）模式**：将 8 个审查维度拆分为 8 个并行子任务，每个负责一个维度。所有子任务同时执行，汇总后由主流程去重、判定 severity、执行自动修复。
 
-并行模式实现：
+**平台支持**：
+
+| 平台 | --fast 支持 | 实现方式 |
+|------|------------|----------|
+| Claude Code | ✅ 原生支持 | `Agent` 工具 + `schema` 结构化输出 |
+| Codex | ⚠️ 取决于版本 | Codex 子代理机制（如可用）；否则降级为内联 |
+| OpenClaw | ⚠️ 取决于配置 | 若后端支持并行 sub-agent 则可使用 |
+| Hermes | ⚠️ 取决于版本 | 参考 Hermes 文档中的并行任务能力 |
+
+**通用并行审查流程**（平台无关描述）：
 
 ```
 1. 为每个维度构造审查 prompt（包含：章节全文 + 对应数据源文件内容 + 维度检查清单）
-2. 并行启动 8 个 agent：
-   agent("审查 continuity...",  schema=REVIEW_ISSUE_SCHEMA)
-   agent("审查 setting...",     schema=REVIEW_ISSUE_SCHEMA)
-   agent("审查 character...",   schema=REVIEW_ISSUE_SCHEMA)
-   agent("审查 timeline...",    schema=REVIEW_ISSUE_SCHEMA)
-   agent("审查 ai_flavor...",   schema=REVIEW_ISSUE_SCHEMA)
-   agent("审查 logic...",       schema=REVIEW_ISSUE_SCHEMA)
-   agent("审查 pacing...",      schema=REVIEW_ISSUE_SCHEMA)
-   agent("审查 foreshadow...",  schema=REVIEW_ISSUE_SCHEMA)
-3. 等待全部返回 → .filter(Boolean) 去除失败项
+2. 使用当前平台提供的并行/子任务机制，同时启动 8 个审查子任务：
+   - continuity（连续性）  - setting（设定）
+   - character（角色）     - timeline（时间线）
+   - ai_flavor（AI文风）   - logic（逻辑）
+   - pacing（节奏）        - foreshadow（伏笔）
+3. 等待全部返回 → 去除失败/超时的子任务
 4. 合并所有 issues → 去重（同位置同类型的 issue 合并）
 5. 对合并后的 issues 执行 3.2 severity 判定 + 3.3 自动修复
 6. 输出 review_results.json（与内联模式格式完全一致）
+```
+
+> **Claude Code 实现参考**：使用 `Agent` 工具并行调用 8 个 `agent("审查 <维度>...", schema=REVIEW_ISSUE_SCHEMA)`，`.filter(Boolean)` 去失败项后合并。
+
+> **若平台不支持子代理**：`--fast` 自动降级为内联模式，8 个维度在主流程中依次执行。不阻断流程。
 ```
 
 > **降级时**：若某维度对应的数据源在 §1.1 被标记为 Tier 2 缺失，该维度的 agent 自动跳过，issue 列表为空。
@@ -286,7 +336,7 @@ python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" \
 ### 3.3 自动修复规则
 
 - blocking=true 且可修复 → 立即用 Edit 修复正文，标注修复位置
-- blocking=true 且不可修复（如涉及剧情方向） → 用 AskUserQuestion 让用户裁决
+- blocking=true 且不可修复（如涉及剧情方向） → 向用户提问，让用户裁决
 - blocking=false → 记录在 issue 列表中，可在 Phase 4 润色时修复
 - 修复后不重新跑全量审查（只确认修复正确）
 
@@ -485,7 +535,7 @@ python -X utf8 "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" bac
 | Phase 0 预检失败 | 报告缺失项，不继续 |
 | Phase 0 合同缺失（chapter_00N.json / review.json 不存在） | 手动创建合同文件（参考上一章模板），然后重跑 write-gate |
 | Phase 0 story-system 被 guard hook 拦截 | 绕过：手动创建 contracts 后直接调用 write-gate |
-| Phase 3 blocking issue 无法自动修复 | AskUserQuestion 让用户裁决 |
+| Phase 3 blocking issue 无法自动修复 | 向用户提问，让用户裁决 |
 | Phase 5 precommit schema 报错 | 根据 repair 提示修正 JSON，重跑 precommit |
 | Phase 5 commit 报错 | 修正 JSON 后重跑 chapter-commit |
 | Phase 5 vector projection 失败（ModelScope API 401 等） | 外部基础设施问题，不阻塞。state/index/summary/memory 四维 done 即可 commit |
